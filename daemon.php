@@ -1,6 +1,8 @@
 <?php
 
 /**
+ * 用于创建一个标准的 PHP 守护进程
+ * 
  * @Author: GeekWho
  * @Date:   2019-01-19 17:31:43
  * @Last Modified by:   GeekWho
@@ -8,23 +10,51 @@
  */
 class Daemon
 {
-    public $pid = '/tmp/daemon.pid';
-
-    public $job = '/tmp/job.log';
-
-    public $dir = '/tmp/';
+    private $pidFile = '/tmp/daemon.pid';
+    private $logFile = '/tmp/daemon.log';
+    private $jobFile = '/tmp/job.log';
+    private $workDir = '/tmp/';
 
     /**
-     * 执行入口
+     * 守护进程运行入口
      */
     public function run()
     {
-        $this->_daemon();
+        $this->checkEnvironment();
+        $this->checkAlreadyRunning();
+        $this->daemonize();
+        $this->writePidFile();
+        $this->mainLoop();
     }
 
     /**
-     * 实现daemon化
-     *
+     * 环境检查：扩展 + CLI 模式
+     */
+    private function checkEnvironment()
+    {
+        if (!extension_loaded('pcntl') || !extension_loaded('posix')) {
+            die("缺少必要扩展：pcntl 或 posix\n");
+        }
+        if (php_sapi_name() !== "cli") {
+            die("只能在 CLI 模式下运行\n");
+        }
+    }
+
+    /**
+     * 检查是否已有运行中的守护进程
+     */
+    private function checkAlreadyRunning()
+    {
+        if (file_exists($this->pidFile)) {
+            $pid = file_get_contents($this->pidFile);
+            if ($pid && posix_kill((int)$pid, 0)) {
+                die("守护进程已在运行，PID: $pid\n");
+            }
+        }
+    }
+
+    /**
+     * 执行 daemon 化
      * 1. 复制一个子进程出来
      * 2. 创建新的会话
      * 3. 改变当前目录
@@ -41,88 +71,61 @@ class Daemon
      * @see http://php.net/manual/zh/function.fwrite.php
      * @see http://php.net/manual/zh/function.fclose.php
      */
-    private function _daemon()
+    private function daemonize()
     {
-        $this->before();
-
-        $this->logger(__FUNCTION__ . ' before run');
         $pid = pcntl_fork();
         if ($pid == -1) {
-            die('fork failed' . PHP_EOL);
+            die("创建子进程失败\n");
         }
-        if ($pid) {
-            //退出父进程
-            exit(0);
+        if ($pid > 0) {
+            exit(0); // 父进程退出
         }
-        $this->logger('fork pid ' . $pid . PHP_EOL);
 
-        $this->logger('posix_setsid before run');
-        $session_id = posix_setsid();
-        @posix_setegid(-1);
-        @posix_seteuid(-1);
-        if ($session_id == -1) {
-            die('session failed' . PHP_EOL);
+        if (posix_setsid() == -1) {
+            die("创建会话失败\n");
         }
-        $this->logger('posix_setsid after run');
 
-        $this->logger('chdir before run');
-        chdir($this->dir);
-        $this->logger('chdir after run');
+        chdir($this->workDir);
+        umask(0);
 
-        $this->logger('umask before run');
-        $old = umask();
-        $new = umask(0);
-        $this->logger("old mask is " . $old . ' new mask is ' . $new);
-        $this->logger('umask after run');
-
-        $this->logger('fclose before run');
-
-        try {
-            $fp = fopen($this->pid, 'w') or die("Can't create pid file");
-            //把当前进程的id写入到文件中
-            fwrite($fp, posix_getpid());
-            fclose($fp);
-            //关闭文件描述符
-            fclose(STDIN);
-            fclose(STDOUT);
-            fclose(STDERR);
-        } catch (\Exception $e) {
-            var_dump($e->getMessage());
-        }
-        /**
-         * 遇到的坑
-         * 1. 在当前的位置关闭文件描述符后，就不能再写日志了
-         * 2. 整体的逻辑只能写在一个函数里，如果是两个函数就可能不起作用了。
-         */
-
-        $this->after();
-        return;
+        // 关闭并重定向标准输入输出
+        fclose(STDIN);
+        fclose(STDOUT);
+        fclose(STDERR);
+        fopen('/dev/null', 'r');
+        fopen('/dev/null', 'a');
+        fopen('/dev/null', 'a');
     }
 
     /**
-     * 环境检查函数
+     * 写入 PID 文件
      */
-    public function before()
+    private function writePidFile()
     {
-        extension_loaded('pcntl') or die('pcntl extension is not installed');
-        extension_loaded('posix') or die('posix extension is not installed');
-        php_sapi_name() === "cli" or die('only run cli');
+        file_put_contents($this->pidFile, posix_getpid());
+        $this->log("守护进程启动，PID: " . posix_getpid());
     }
 
-    public function after()
+    /**
+     * 守护进程主循环
+     */
+    private function mainLoop()
     {
         while (true) {
-            file_put_contents($this->job, microtime(true) . ' job ' . PHP_EOL, FILE_APPEND);
+            $timestamp = microtime(true);
+            file_put_contents($this->jobFile, "$timestamp job\n", FILE_APPEND);
+            $this->log("运行中: $timestamp");
             sleep(5);
         }
     }
 
     /**
-     * 日志
+     * 日志记录函数
+     * @param string $msg
      */
-    private function logger($msg)
+    private function log(string $msg)
     {
-        echo microtime(true) . ' ' . $msg . PHP_EOL;
+        file_put_contents($this->logFile, date('Y-m-d H:i:s') . " $msg\n", FILE_APPEND);
     }
 }
 
